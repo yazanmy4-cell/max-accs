@@ -66,7 +66,7 @@ i[data-lucide].sm{width:11px;height:11px}
 .gold-btn{flex:1;border:0;border-radius:12px;padding:14px;background:#1a1a1c;color:#fff;font-weight:950;font-size:12px;letter-spacing:.06em;transition:.15s;border:1px solid #2a2a2c}
 .gold-btn:hover{background:#222225;border-color:#3a3a3f;transform:translateY(-1px)}
 .gold-btn i[data-lucide]{color:#fff;width:14px;height:14px}
-.ghost{border:1px solid var(--line);border-radius:12px;background:#0d0d0f;color:#999;padding:14px 20px;font-size:12px;font-weight:700;transition:.15s}
+.ghost{border:1px solid var(--line);border-radius:12px;background:#0d0d0f;color:#999;padding:14px 20px;font-size:12px;font-weight:700;transition:.15s;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .ghost:hover{border-color:#3a3a3f;color:#ddd}
 .ghost i[data-lucide]{width:14px;height:14px}
 .note{font-size:10px;color:#555;line-height:1.5;margin-top:10px}
@@ -178,7 +178,7 @@ select.input{cursor:pointer;appearance:none;background-image:url("data:image/svg
 .batch-session{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #1a1a1c;font-size:11px;gap:8px;flex-wrap:wrap}
 .batch-session:last-child{border-bottom:none}
 .batch-session .bs-name{color:#fff;font-weight:700;flex:1;min-width:120px}
-.batch-session .bs-info{color:#888;display:flex;gap:10px;font-size:10px}
+.batch-session .bs-info{color:#888;display:flex;gap:10px;font-size:10px;flex-wrap:wrap}
 .batch-session .bs-info b{color:#67efa0;font-weight:800}
 
 .toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,18px);opacity:0;pointer-events:none;padding:12px 18px;border:1px solid #2a2a2c;background:#0d0d0f;color:#fff;border-radius:12px;font-size:12px;transition:.25s;z-index:100;box-shadow:0 10px 30px rgba(0,0,0,0.6)}
@@ -332,7 +332,7 @@ footer{text-align:center;color:#333;font-size:10px;padding:0 0 25px;letter-spaci
          <b style="color:#fff">Example:</b><br>
          <code style="color:#888;font-size:10px;word-break:break-all">7890808464|yazan-4p5jTynggw4fkkY|yazan-zYwFLE|18268314767|ME</code><br>
          <code style="color:#888;font-size:10px;word-break:break-all">7890808632|yazan-FP4SqXNMIqTL7fy|yazan-JkCwTK|18268314810|ME</code><br><br>
-         <b style="color:#ffcf69">Max 100 accounts. Each plays BR until 48,000 EXP.</b>
+         <b style="color:#ffcf69">Max 100 accounts. Lvl3 → LW, Lvl&lt;3 → BR until Lvl3. Stop at 50,000 EXP.</b>
        </div>
        <div class="field" style="margin-top:0">
          <div class="label"><span>Paste content</span><span>or choose file</span></div>
@@ -361,7 +361,7 @@ footer{text-align:center;color:#333;font-size:10px;padding:0 0 25px;letter-spaci
         <span>Maximum EXP allowed</span>
         <span style="color:#fff;font-weight:950">50,000</span>
       </div>
-      <div class="note" style="margin-top:8px">The system will automatically stop when reaching the next level or 50,000 EXP.</div>
+      <div class="note" style="margin-top:8px">System stops each account at 50,000 EXP and saves to lvl-done.txt.</div>
      </div>
     </div>
    </div>
@@ -404,7 +404,7 @@ footer{text-align:center;color:#333;font-size:10px;padding:0 0 25px;letter-spaci
   <div style="margin-top:28px">
     <div class="title" style="margin-bottom:14px">
       <i data-lucide="layers"></i>
-      BATCH CONTROL (BR until 48,000 EXP)
+      BATCH CONTROL (START ONCE)
     </div>
     <div class="panel" style="padding:16px">
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
@@ -414,6 +414,9 @@ footer{text-align:center;color:#333;font-size:10px;padding:0 0 25px;letter-spaci
         <button class="ghost" id="stopAllBtn" style="min-width:140px">
           <i data-lucide="square"></i> STOP ALL
         </button>
+        <a href="/api/download-done" class="ghost" id="downloadDoneBtn" style="min-width:160px">
+          <i data-lucide="download"></i> DOWNLOAD DONE
+        </a>
       </div>
       <div class="stats-grid" style="padding:0;grid-template-columns:1fr 1fr 1fr 1fr">
         <div class="stat-box"><i data-lucide="users"></i><div class="stat-value js-total-uploaded">0</div><div class="stat-label">Total</div></div>
@@ -421,8 +424,21 @@ footer{text-align:center;color:#333;font-size:10px;padding:0 0 25px;letter-spaci
         <div class="stat-box"><i data-lucide="play"></i><div class="stat-value js-playing">0</div><div class="stat-label">Playing</div></div>
         <div class="stat-box"><i data-lucide="check-circle"></i><div class="stat-value js-done">0</div><div class="stat-label">Done</div></div>
       </div>
-      <div id="brSessionsList" style="margin-top:14px;border:1px solid #1a1a1c;border-radius:12px;background:#0a0a0b;overflow:hidden">
+      <div id="brSessionsList" style="margin-top:14px;border:1px solid #1a1a1c;border-radius:12px;background:#0a0a0b;overflow:hidden;max-height:250px;overflow-y:auto">
         <div style="color:#555;font-size:11px;padding:12px;text-align:center">No active sessions.</div>
+      </div>
+
+      <div style="margin-top:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="title" style="font-size:12px">
+            <i data-lucide="check-check"></i>
+            COMPLETED (lvl-done.txt)
+          </div>
+          <span class="badge" id="doneCountBadge">0</span>
+        </div>
+        <div id="doneList" style="border:1px solid #1a1a1c;border-radius:12px;background:#0a0a0b;overflow:hidden;max-height:300px;overflow-y:auto">
+          <div style="color:#555;font-size:11px;padding:12px;text-align:center">No completed accounts yet.</div>
+        </div>
       </div>
     </div>
   </div>
@@ -662,11 +678,11 @@ $('#uploadBtn').onclick = async () => {
 };
 
 $('#startAllBtn').onclick = async () => {
-  if (!confirm('Start processing all uploaded accounts? Each plays BR until 48,000 EXP.')) return;
+  if (!confirm('Start all accounts? Lvl3 → LW, Lvl<3 → BR until Lvl3. Stop at 50,000 EXP.')) return;
   $('#startAllBtn').disabled = true;
   try {
     await api('/api/start-all', { method: 'POST' });
-    toast('Batch processing started');
+    toast('Processing started');
   } catch (e) {
     toast(e.message);
   } finally {
@@ -1194,20 +1210,54 @@ async function pollBatchProgress(){
   } catch (e) {}
 }
 
+async function pollDoneList(){
+  try {
+    const r = await api('/api/done-list');
+    const badge = $('#doneCountBadge');
+    if (badge) badge.textContent = r.count || 0;
+    const list = $('#doneList');
+    if (!list) return;
+    if (r.accounts && r.accounts.length) {
+      list.innerHTML = r.accounts.slice(-30).reverse().map(a => `
+        <div class="batch-session">
+          <span class="bs-name">${a.name || a.uid}</span>
+          <span class="bs-info">
+            <span>UID <b>${a.uid}</b></span>
+            <span>Lvl <b>${a.level}</b></span>
+            <span>EXP <b>${fmt(a.exp)}</b></span>
+          </span>
+        </div>
+      `).join('');
+    } else {
+      list.innerHTML = '<div style="color:#555;font-size:11px;padding:12px;text-align:center">No completed accounts yet.</div>';
+    }
+  } catch (e) {}
+}
+
 function startPolling(){
   stopPolling();
   startedAt = Date.now();
   pollOnce();
   pollBatchProgress();
-  pollTimer = setInterval(() => { pollOnce(); pollBatchProgress(); }, 10000);
-  expTimer  = setInterval(pollExpOnly, 3000);
+  pollDoneList();
+  pollTimer = setInterval(() => { 
+    pollOnce(); 
+    pollBatchProgress();
+    pollDoneList();
+  }, 10000);
+  expTimer = setInterval(pollExpOnly, 3000);
 }
 function stopPolling(){
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (expTimer)  { clearInterval(expTimer);  expTimer = null; }
 }
 
-$('#refreshBtn').onclick = () => { pollOnce(); pollBatchProgress(); toast('Refreshed'); };
+$('#refreshBtn').onclick = () => { 
+  pollOnce(); 
+  pollBatchProgress();
+  pollDoneList();
+  toast('Refreshed'); 
+};
 $('#backSetup').onclick = () => { stopPolling(); show('setupPage'); };
 $('#addAccountBtn').onclick = () => { stopPolling(); show('setupPage'); };
 
