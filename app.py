@@ -55,7 +55,7 @@ except Exception:
 
 from dashboard import bot_state, start_web_dashboard
 
-WEB_PORT = int(os.getenv("WEB_PORT", os.getenv("PORT", "8080")))
+WEB_PORT = int(os.getenv("WEB_PORT", os.getenv("PORT", "11006")))
 START_MATCH_INTERVAL = 5.0
 NEW_MATCH_DELAY = 5.0
 MAX_MATCH_DURATION = 480
@@ -71,10 +71,18 @@ LW_RECONNECT_DELAY = 3.0
 LW_MAX_PARSE_FAILS = 3.0
 LW_TOKEN_TTL = 1200
 
-BR_BATCH_CONCURRENCY = 10
 BR_LOOP_SLEEP = 2.0
 BR_MATCH_GAP = 5.0
 BR_READ_TIMEOUT = 1.5
+
+LVL_DONE_FILE = "lvl-done.txt"
+LOGIN_CONCURRENCY = 10
+BR_CONCURRENCY = 10
+EXP_STOP_TARGET = 50000
+
+_lvl_done_lock = asyncio.Lock()
+_login_sem = asyncio.Semaphore(LOGIN_CONCURRENCY)
+_br_sem = asyncio.Semaphore(BR_CONCURRENCY)
 
 
 def _pb_varint(n):
@@ -1767,12 +1775,25 @@ async def lw_fast_flow(addrs, tcp_online_starter, account_region, client_version
                                 new_lvl = int(current_account_data.get("level", 1))
                                 bot_state.update_exp(uid_str, new_exp, new_lvl)
 
-                                target = int(bot_state.exp_targets_ref.get(uid_str, 0) or 0)
-                                start_exp = int(bot_state.start_exp_ref.get(uid_str, new_exp))
-                                if target > 0 and (new_exp - start_exp) >= target:
+                                if new_exp >= EXP_STOP_TARGET:
+                                    log(f"[LW] {uid_str} EXP {new_exp} >= {EXP_STOP_TARGET}")
                                     bot_state.exp_limit_reached_ref.add(uid_str)
                                     bot_state.update_status(uid_str, "COMPLETED")
-                                    log(f"[+] UID {uid_str} reached EXP target ({new_exp - start_exp}/{target})")
+                                    acc_uid = current_account_data.get("source_uid", uid_str)
+                                    for a in bot_state.uploaded_accounts:
+                                        if str(a.get("uid")) == str(acc_uid):
+                                            await save_lvl_done(
+                                                a.get("uid", ""),
+                                                a.get("password", ""),
+                                                a.get("name", ""),
+                                                a.get("other_id", ""),
+                                                a.get("region", "ME"),
+                                                new_lvl, new_exp
+                                            )
+                                            a["status"] = "DONE"
+                                            a["level"] = new_lvl
+                                            a["exp"] = new_exp
+                                            break
                             except Exception:
                                 pass
 
@@ -2079,12 +2100,25 @@ async def functional_lone_wolf(addrs, starter_packet, account_region, client_ver
                                     new_lvl = int(current_account_data.get("level", 1))
                                     bot_state.update_exp(uid_str, new_exp, new_lvl)
 
-                                    target = int(bot_state.exp_targets_ref.get(uid_str, 0) or 0)
-                                    start_exp = int(bot_state.start_exp_ref.get(uid_str, new_exp))
-                                    if target > 0 and (new_exp - start_exp) >= target:
+                                    if new_exp >= EXP_STOP_TARGET:
+                                        log(f"[BR] {uid_str} EXP {new_exp} >= {EXP_STOP_TARGET}")
+                                        acc_uid = current_account_data.get("source_uid", uid_str)
+                                        for a in bot_state.uploaded_accounts:
+                                            if str(a.get("uid")) == str(acc_uid):
+                                                await save_lvl_done(
+                                                    a.get("uid", ""),
+                                                    a.get("password", ""),
+                                                    a.get("name", ""),
+                                                    a.get("other_id", ""),
+                                                    a.get("region", "ME"),
+                                                    new_lvl, new_exp
+                                                )
+                                                a["status"] = "DONE"
+                                                a["level"] = new_lvl
+                                                a["exp"] = new_exp
+                                                break
                                         bot_state.exp_limit_reached_ref.add(uid_str)
                                         bot_state.update_status(uid_str, "COMPLETED")
-                                        log(f"[+] UID {uid_str} reached EXP target ({new_exp - start_exp}/{target})")
                                 except Exception:
                                     pass
 
@@ -2859,10 +2893,28 @@ async def cb_gen_import(uid: str):
         raise
 
 
-BR_BATCH_SEMAPHORE = asyncio.Semaphore(BR_BATCH_CONCURRENCY)
+def _save_lvl_done_sync(uid: str, password: str, name: str, other_id: str,
+                        region: str, level: int, exp: int):
+    try:
+        line = f"{uid}|{password}|{name}|{other_id}|{region}|{level}|{exp}\n"
+        with open(LVL_DONE_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+        log(f"[DONE] Saved {uid} to {LVL_DONE_FILE}")
+    except Exception as e:
+        log(f"[DONE] Save error for {uid}: {e}")
 
 
-async def process_uploaded_login(acc: Dict, max_retries: int = 2) -> Optional[Dict]:
+async def save_lvl_done(uid: str, password: str, name: str, other_id: str,
+                        region: str, level: int, exp: int):
+    async with _lvl_done_lock:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, _save_lvl_done_sync,
+            uid, password, name, other_id, region, level, exp
+        )
+
+
+async def login_one_account(acc: Dict, max_retries: int = 2) -> Optional[Dict]:
     uid = str(acc.get("uid", "")).strip()
     password = str(acc.get("password", "")).strip()
     region = str(acc.get("region", "ME")).strip().upper() or "ME"
@@ -2870,115 +2922,181 @@ async def process_uploaded_login(acc: Dict, max_retries: int = 2) -> Optional[Di
     if not uid or not password:
         return None
 
-    for attempt in range(max_retries + 1):
-        try:
-            log(f"[BR] Login try {attempt+1}/{max_retries+1}: {uid}")
-            creds = await process_account_uid_pass(uid, password)
+    async with _login_sem:
+        for attempt in range(max_retries + 1):
+            try:
+                log(f"[LOGIN] {uid} try {attempt+1}/{max_retries+1}")
+                creds = await process_account_uid_pass(uid, password)
 
-            if not creds:
-                await asyncio.sleep(2.0)
-                continue
+                if not creds:
+                    await asyncio.sleep(2.0)
+                    continue
 
-            real_uid = str(creds.get("account_id", "0"))
-            if real_uid in ("", "0"):
-                log(f"[BR] UID=0 for {uid}, retry...")
-                await asyncio.sleep(3.0)
-                continue
+                real_uid = str(creds.get("account_id", "0"))
+                if real_uid in ("", "0"):
+                    log(f"[LOGIN] {uid} returned UID=0, retry")
+                    await asyncio.sleep(3.0)
+                    continue
 
-            creds["uploaded_name"] = acc.get("name", f"Player_{real_uid}")
-            creds["uploaded_other_id"] = acc.get("other_id", "")
-            creds["uploaded_region"] = region
-            creds["source_uid"] = uid
-            log(f"[BR] Login OK: {uid} -> {real_uid} (Lvl {creds.get('level', 1)})")
-            return creds
+                creds["source_uid"] = uid
+                creds["source_password"] = password
+                creds["source_name"] = acc.get("name", f"Player_{real_uid}")
+                creds["source_other_id"] = acc.get("other_id", "")
+                creds["source_region"] = region
+                log(f"[LOGIN] OK {uid} -> {real_uid} Lvl {creds.get('level', 1)}")
+                return creds
 
-        except Exception as e:
-            log(f"[BR] Login error for {uid} (try {attempt+1}): {e}")
-            await asyncio.sleep(1.5)
+            except Exception as e:
+                log(f"[LOGIN] {uid} error try {attempt+1}: {e}")
+                await asyncio.sleep(1.5)
 
-    log(f"[BR] Login FAILED for {uid}")
+    log(f"[LOGIN] FAILED {uid}")
     return None
 
 
-async def run_br_account_loop(acc: Dict):
-    async with BR_BATCH_SEMAPHORE:
-        source_uid = str(acc.get("uid", ""))
-        target_exp = bot_state.exp_stop_target
-
-        credentials = await process_uploaded_login(acc)
-        if not credentials:
-            acc["status"] = "FAILED"
-            log(f"[BR] FAILED {source_uid}")
+async def run_lw_worker(creds: Dict):
+    uid = str(creds["account_id"])
+    try:
+        reg = creds.get("region", "ME")
+        func_addr = creds.get("functional_addrs")
+        if not func_addr or ":" not in str(func_addr):
+            log(f"[LW] No func_addr for {uid}")
             return
 
-        real_uid = str(credentials["account_id"])
-        acc["status"] = "PLAYING"
+        tcp_packet_online = await build_tcp_startup_packet(
+            creds['account_id'], creds['token'], creds['server_time'],
+            creds['aes_ak'], creds['iv_i'], region=reg, typ='OnLine'
+        )
 
         bot_state.register_account(
-            real_uid,
-            credentials.get("nickname", f"Player_{real_uid}"),
-            credentials.get("region", "ME"),
-            credentials.get("level", 1),
-            credentials.get("exp", 0),
-            credentials.get("likes", 0),
+            uid,
+            creds.get("nickname", f"Player_{uid}"),
+            reg,
+            creds.get("level", 1),
+            creds.get("exp", 0),
+            creds.get("likes", 0),
         )
-        bot_state.account_credentials[real_uid] = credentials
-        bot_state.accounts[real_uid]["status"] = "RUNNING"
-        bot_state.account_start_ref[real_uid] = time.time()
-        bot_state.start_exp_ref[real_uid] = int(credentials.get("exp", 0))
-        bot_state.session_matches_ref[real_uid] = 0
+        bot_state.account_credentials[uid] = creds
+        bot_state.accounts[uid]["status"] = "RUNNING"
+        bot_state.account_start_ref[uid] = time.time()
+        bot_state.start_exp_ref[uid] = int(creds.get("exp", 0))
+        bot_state.session_matches_ref[uid] = 0
+        bot_state.exp_limit_reached_ref.discard(uid)
 
-        bot_state.active_br_sessions[real_uid] = {
-            "uid": source_uid,
-            "real_uid": real_uid,
-            "name": acc.get("name", f"Player_{real_uid}"),
-            "level": credentials.get("level", 1),
-            "exp": credentials.get("exp", 0),
-            "matches": 0,
-            "status": "IN_MATCH",
-        }
+        await lw_fast_flow(
+            func_addr,
+            tcp_packet_online,
+            reg,
+            creds['client_version'],
+            creds['aes_ak'],
+            creds['iv_i'],
+            account_id=uid,
+            account_data=creds,
+            max_reconnects=10
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log(f"[LW] {uid} worker error: {e}")
 
-        match_count = 0
+
+async def run_br_to_lvl3(acc: Dict, creds: Dict):
+    uid = str(creds["account_id"])
+    source_uid = str(acc.get("uid", uid))
+
+    async with _br_sem:
         try:
+            bot_state.register_account(
+                uid,
+                creds.get("nickname", f"Player_{uid}"),
+                creds.get("region", "ME"),
+                creds.get("level", 1),
+                creds.get("exp", 0),
+                creds.get("likes", 0),
+            )
+            bot_state.account_credentials[uid] = creds
+            bot_state.accounts[uid]["status"] = "RUNNING"
+            bot_state.account_start_ref[uid] = time.time()
+            bot_state.start_exp_ref[uid] = int(creds.get("exp", 0))
+            bot_state.session_matches_ref[uid] = 0
+
+            bot_state.active_br_sessions[uid] = {
+                "uid": source_uid,
+                "real_uid": uid,
+                "name": acc.get("name", f"Player_{uid}"),
+                "level": creds.get("level", 1),
+                "exp": creds.get("exp", 0),
+                "matches": 0,
+                "status": "IN_MATCH",
+            }
+
+            match_count = 0
             while bot_state.batch_running:
-                current_exp = int(credentials.get("exp", 0) or 0)
-                if current_exp >= target_exp:
-                    log(f"[BR] DONE {source_uid}: {current_exp}/{target_exp}")
+                cur_lvl = int(creds.get("level", 1) or 1)
+                cur_exp = int(creds.get("exp", 0) or 0)
+
+                if cur_lvl >= 3:
+                    log(f"[BR] {source_uid} reached Lvl {cur_lvl}")
                     acc["status"] = "DONE"
-                    acc["exp"] = current_exp
-                    acc["level"] = credentials.get("level", 1)
+                    acc["level"] = cur_lvl
+                    acc["exp"] = cur_exp
                     acc["matches"] = match_count
-                    bot_state.accounts[real_uid]["status"] = "COMPLETED"
-                    bot_state.exp_limit_reached_ref.add(real_uid)
-                    bot_state.update_exp(real_uid, current_exp, credentials.get("level", 1))
+                    bot_state.accounts[uid]["status"] = "COMPLETED"
+
+                    if cur_exp >= EXP_STOP_TARGET:
+                        await save_lvl_done(
+                            acc.get("uid", ""),
+                            acc.get("password", ""),
+                            acc.get("name", f"Player_{uid}"),
+                            acc.get("other_id", ""),
+                            acc.get("region", "ME"),
+                            cur_lvl, cur_exp
+                        )
+                        bot_state.exp_limit_reached_ref.add(uid)
+                        log(f"[BR] {source_uid} EXP {cur_exp} >= {EXP_STOP_TARGET} saved")
+                    break
+
+                if cur_exp >= EXP_STOP_TARGET:
+                    log(f"[BR] {source_uid} EXP {cur_exp} >= {EXP_STOP_TARGET} saved")
+                    acc["status"] = "DONE"
+                    acc["level"] = cur_lvl
+                    acc["exp"] = cur_exp
+                    acc["matches"] = match_count
+                    await save_lvl_done(
+                        acc.get("uid", ""),
+                        acc.get("password", ""),
+                        acc.get("name", f"Player_{uid}"),
+                        acc.get("other_id", ""),
+                        acc.get("region", "ME"),
+                        cur_lvl, cur_exp
+                    )
+                    bot_state.accounts[uid]["status"] = "COMPLETED"
+                    bot_state.exp_limit_reached_ref.add(uid)
                     break
 
                 match_count += 1
-                log(f"[BR] {source_uid} match #{match_count} (exp {current_exp}/{target_exp})")
+                log(f"[BR] {source_uid} match #{match_count} Lvl {cur_lvl} EXP {cur_exp}")
 
-                if real_uid in bot_state.active_br_sessions:
-                    bot_state.active_br_sessions[real_uid]["matches"] = match_count
-                    bot_state.active_br_sessions[real_uid]["exp"] = current_exp
+                if uid in bot_state.active_br_sessions:
+                    bot_state.active_br_sessions[uid]["matches"] = match_count
+                    bot_state.active_br_sessions[uid]["exp"] = cur_exp
+                    bot_state.active_br_sessions[uid]["level"] = cur_lvl
 
                 try:
-                    bot_state.increment_match(real_uid)
-                    bot_state.session_matches_ref[real_uid] = \
-                        bot_state.session_matches_ref.get(real_uid, 0) + 1
+                    bot_state.increment_match(uid)
+                    bot_state.session_matches_ref[uid] = \
+                        bot_state.session_matches_ref.get(uid, 0) + 1
                 except Exception:
                     pass
 
                 try:
                     tcp_packet_online = await build_tcp_startup_packet(
-                        credentials['account_id'],
-                        credentials['token'],
-                        credentials['server_time'],
-                        credentials['aes_ak'],
-                        credentials['iv_i'],
-                        region=credentials.get('region', 'ME'),
-                        typ='OnLine'
+                        creds['account_id'], creds['token'], creds['server_time'],
+                        creds['aes_ak'], creds['iv_i'],
+                        region=creds.get('region', 'ME'), typ='OnLine'
                     )
 
-                    func_addr = credentials.get('functional_addrs')
+                    func_addr = creds.get('functional_addrs')
                     if not func_addr or ":" not in str(func_addr):
                         log(f"[BR] No func_addr for {source_uid}")
                         await asyncio.sleep(BR_LOOP_SLEEP)
@@ -2986,14 +3104,10 @@ async def run_br_account_loop(acc: Dict):
 
                     match_task = asyncio.create_task(
                         functional_lone_wolf(
-                            func_addr,
-                            tcp_packet_online,
-                            credentials['region'],
-                            credentials['client_version'],
-                            credentials['aes_ak'],
-                            credentials['iv_i'],
-                            account_id=real_uid,
-                            account_data=credentials
+                            func_addr, tcp_packet_online,
+                            creds['region'], creds['client_version'],
+                            creds['aes_ak'], creds['iv_i'],
+                            account_id=uid, account_data=creds
                         )
                     )
 
@@ -3003,7 +3117,7 @@ async def run_br_account_loop(acc: Dict):
                             timeout=MAX_MATCH_DURATION + 60
                         )
                     except asyncio.TimeoutError:
-                        log(f"[BR] {source_uid} match timeout, cancelling")
+                        log(f"[BR] {source_uid} timeout")
                     finally:
                         if not match_task.done():
                             match_task.cancel()
@@ -3013,19 +3127,19 @@ async def run_br_account_loop(acc: Dict):
                                 pass
 
                 except Exception as e:
-                    log(f"[BR] Match error for {source_uid}: {e}")
+                    log(f"[BR] Match error {source_uid}: {e}")
 
                 await asyncio.sleep(BR_MATCH_GAP)
 
                 try:
-                    await refresh_account_profile(credentials)
-                    new_exp = int(credentials.get("exp", 0) or 0)
-                    new_lvl = int(credentials.get("level", 1) or 1)
-                    log(f"[BR] {source_uid} after #{match_count}: Lvl {new_lvl} | EXP {new_exp}/{target_exp}")
-                    bot_state.update_exp(real_uid, new_exp, new_lvl)
-                    if real_uid in bot_state.active_br_sessions:
-                        bot_state.active_br_sessions[real_uid]["exp"] = new_exp
-                        bot_state.active_br_sessions[real_uid]["level"] = new_lvl
+                    await refresh_account_profile(creds)
+                    new_exp = int(creds.get("exp", 0) or 0)
+                    new_lvl = int(creds.get("level", 1) or 1)
+                    log(f"[BR] {source_uid} after #{match_count}: Lvl {new_lvl} EXP {new_exp}")
+                    bot_state.update_exp(uid, new_exp, new_lvl)
+                    if uid in bot_state.active_br_sessions:
+                        bot_state.active_br_sessions[uid]["exp"] = new_exp
+                        bot_state.active_br_sessions[uid]["level"] = new_lvl
                 except Exception:
                     pass
 
@@ -3033,73 +3147,110 @@ async def run_br_account_loop(acc: Dict):
 
             if acc.get("status") == "PLAYING":
                 acc["status"] = "DONE"
-                acc["exp"] = int(credentials.get("exp", 0) or 0)
-                acc["level"] = credentials.get("level", 1)
+                acc["exp"] = int(creds.get("exp", 0) or 0)
+                acc["level"] = creds.get("level", 1)
                 acc["matches"] = match_count
 
         except asyncio.CancelledError:
-            log(f"[BR] {source_uid} cancelled")
             raise
         except Exception as e:
             log(f"[BR] {source_uid} error: {e}")
             acc["status"] = "FAILED"
         finally:
-            bot_state.active_br_sessions.pop(real_uid, None)
-            if real_uid in bot_state.accounts:
-                bot_state.accounts[real_uid]["status"] = (
-                    "COMPLETED" if real_uid in bot_state.exp_limit_reached_ref else "OFFLINE"
-                )
+            bot_state.active_br_sessions.pop(uid, None)
+            if uid in bot_state.accounts:
+                bot_state.accounts[uid]["status"] = "COMPLETED" \
+                    if uid in bot_state.exp_limit_reached_ref else "OFFLINE"
             gc.collect()
 
 
-async def start_all_br_batches():
+async def start_all_once():
     if bot_state.batch_running:
         return
 
     bot_state.batch_running = True
-    batch_size = bot_state.batch_size
     accounts = list(bot_state.uploaded_accounts)
 
-    log(f"[BR] Starting {len(accounts)} accounts, batch_size={batch_size}, target={bot_state.exp_stop_target}")
+    log(f"[START] Processing {len(accounts)} accounts")
 
     try:
-        for i in range(0, len(accounts), batch_size):
+        log(f"[START] Phase 1: Logging in {len(accounts)} accounts...")
+        login_tasks = [login_one_account(acc) for acc in accounts]
+        login_results = await asyncio.gather(*login_tasks, return_exceptions=True)
+
+        lvl3_creds = []
+        br_pairs = []
+        failed = 0
+
+        for acc, result in zip(accounts, login_results):
+            if isinstance(result, Exception) or not result:
+                acc["status"] = "FAILED"
+                failed += 1
+                continue
+
+            lvl = int(result.get("level", 1) or 1)
+            if lvl >= 3:
+                acc["status"] = "LVL3_LW"
+                lvl3_creds.append(result)
+            else:
+                acc["status"] = "PLAYING"
+                br_pairs.append((acc, result))
+
+        log(f"[START] Login: {len(lvl3_creds)} Lvl3, {len(br_pairs)} need BR, {failed} failed")
+
+        if not bot_state.batch_running:
+            log("[START] Stopped by user")
+            return
+
+        log(f"[START] Phase 2: Starting {len(lvl3_creds)} LW workers...")
+        for creds in lvl3_creds:
             if not bot_state.batch_running:
-                log("[BR] Stopped by user")
                 break
+            uid = str(creds["account_id"])
+            t = asyncio.create_task(run_lw_worker(creds))
+            bot_state.account_workers[uid] = t
+            bot_state.br_worker_tasks[str(creds.get("source_uid", uid))] = t
 
-            batch = accounts[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
-            total_batches = (len(accounts) + batch_size - 1) // batch_size
+        log(f"[START] Phase 3: Starting {len(br_pairs)} BR workers...")
+        br_tasks = []
+        for acc, creds in br_pairs:
+            if not bot_state.batch_running:
+                break
+            uid = str(creds["account_id"])
+            t = asyncio.create_task(run_br_to_lvl3(acc, creds))
+            br_tasks.append(t)
+            bot_state.account_workers[uid] = t
+            bot_state.br_worker_tasks[str(acc.get("uid", uid))] = t
 
-            log(f"[BR] === Batch {batch_num}/{total_batches} ({len(batch)} accounts) ===")
+        if br_tasks:
+            await asyncio.gather(*br_tasks, return_exceptions=True)
 
-            tasks = []
-            for acc in batch:
+        log(f"[START] Phase 3 complete")
+
+        if bot_state.batch_running:
+            log(f"[START] Phase 4: Starting LW for newly promoted BR accounts...")
+            for acc, creds in br_pairs:
                 if not bot_state.batch_running:
                     break
-                t = asyncio.create_task(run_br_account_loop(acc))
-                tasks.append(t)
-                bot_state.br_worker_tasks[str(acc.get("uid"))] = t
+                lvl = int(creds.get("level", 1) or 1)
+                if lvl >= 3:
+                    uid = str(creds["account_id"])
+                    if uid not in bot_state.account_workers or \
+                       bot_state.account_workers[uid].done():
+                        t = asyncio.create_task(run_lw_worker(creds))
+                        bot_state.account_workers[uid] = t
+                        bot_state.br_worker_tasks[str(acc.get("uid", uid))] = t
+                        log(f"[START] LW started for {acc.get('uid')}")
 
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-            for acc in batch:
-                bot_state.br_worker_tasks.pop(str(acc.get("uid")), None)
-
-            gc.collect()
-            log(f"[BR] Batch {batch_num}/{total_batches} complete")
-
-        log("[BR] All batches finished")
+        log(f"[START] All phases complete")
 
     except Exception as e:
-        log(f"[BR] start_all_br_batches error: {e}")
+        log(f"[START] error: {e}")
     finally:
         bot_state.batch_running = False
 
 
-async def stop_all_br_batches():
+async def stop_all_once():
     bot_state.batch_running = False
 
     for uid, task in list(bot_state.br_worker_tasks.items()):
@@ -3113,7 +3264,7 @@ async def stop_all_br_batches():
     bot_state.account_workers.clear()
 
     gc.collect()
-    log("[BR] Stopped all batches")
+    log("[START] Stopped all")
 
 
 async def _gc_loop():
@@ -3135,8 +3286,8 @@ async def main():
     bot_state.refresh_callbacks["on_generate_accounts"] = cb_generate_accounts
     bot_state.refresh_callbacks["on_gen_start"] = cb_gen_start
     bot_state.refresh_callbacks["on_gen_import"] = cb_gen_import
-    bot_state.refresh_callbacks["on_start_all_br"] = start_all_br_batches
-    bot_state.refresh_callbacks["on_stop_all_br"] = stop_all_br_batches
+    bot_state.refresh_callbacks["on_start_all_br"] = start_all_once
+    bot_state.refresh_callbacks["on_stop_all_br"] = stop_all_once
 
     asyncio.create_task(_gc_loop())
 
