@@ -33,7 +33,7 @@ class BotState:
         self.uploaded_accounts: list = []
         self.batch_running: bool = False
         self.batch_size: int = 20
-        self.exp_stop_target: int = 48000
+        self.exp_stop_target: int = 50000
         self.active_br_sessions: Dict[str, Dict] = {}
         self.br_worker_tasks: Dict[str, asyncio.Task] = {}
 
@@ -517,6 +517,52 @@ async def api_br_progress(request: web.Request):
     })
 
 
+async def api_download_done(request: web.Request):
+    if not _authed(request):
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401)
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "lvl-done.txt")
+    if not os.path.exists(path):
+        return web.Response(
+            text="",
+            content_type="text/plain",
+            headers={"Content-Disposition": 'attachment; filename="lvl-done.txt"'}
+        )
+    return web.FileResponse(
+        path,
+        headers={"Content-Disposition": 'attachment; filename="lvl-done.txt"'}
+    )
+
+
+async def api_done_list(request: web.Request):
+    if not _authed(request):
+        return web.json_response({"accounts": []}, status=401)
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "lvl-done.txt")
+    items = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("|")
+                    if len(parts) >= 5:
+                        items.append({
+                            "uid": parts[0],
+                            "password": parts[1],
+                            "name": parts[2],
+                            "other_id": parts[3],
+                            "region": parts[4],
+                            "level": int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0,
+                            "exp": int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
+                        })
+        except Exception:
+            pass
+    return web.json_response({"accounts": items, "count": len(items)})
+
+
 async def api_state(request: web.Request):
     if not _authed(request):
         return web.json_response({"accounts": []}, status=401)
@@ -623,6 +669,8 @@ async def start_web_dashboard(host="0.0.0.0", port=8080):
     app.router.add_post("/api/start-all",       api_start_all)
     app.router.add_post("/api/stop-all",        api_stop_all)
     app.router.add_get ("/api/br-progress",     api_br_progress)
+    app.router.add_get ("/api/download-done",   api_download_done)
+    app.router.add_get ("/api/done-list",       api_done_list)
 
     app.router.add_get ("/",                    index)
 
